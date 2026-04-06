@@ -5,8 +5,8 @@ WORKDIR /app
 COPY . /app
 
 ENV SPNS_HOST=0.0.0.0
-ENV SPNS_PORT=8080
+ENV SPNS_PORT=10000
 
-EXPOSE 8080
+EXPOSE 10000
 
-CMD ["python", "server/server.py"]
+CMD ["python", "server.py"]
