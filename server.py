@@ -1,5 +1,4 @@
 import json
-import mimetypes
 import os
 import sqlite3
 from datetime import datetime, timezone
@@ -12,8 +11,8 @@ DB_DIR = Path(os.getenv("SPNS_DB_DIR", APP_DIR / "data"))
 DB_DIR.mkdir(parents=True, exist_ok=True)
 DB = DB_DIR / "spns_rapports.db"
 
-HOST = os.getenv("SPNS_HOST", "127.0.0.1")
-PORT = int(os.getenv("SPNS_PORT", "8022"))
+HOST = os.getenv("SPNS_HOST", "0.0.0.0")
+PORT = int(os.getenv("PORT", os.getenv("SPNS_PORT", "10000")))
 ALLOWED_ORIGIN = os.getenv("SPNS_ALLOWED_ORIGIN", "*")
 TABLES = {"activities", "requests"}
 
@@ -89,3 +88,79 @@ def delete_item(table_name, item_id):
     cur = conn.execute(f"delete from {table_name} where id = ?", (item_id,))
     conn.commit()
     deleted = cur.rowcount > 0
+    conn.close()
+    return deleted
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self._cors()
+        self.end_headers()
+
+    def do_GET(self):
+        path = urlparse(self.path).path
+        if path == "/api/health":
+            return self.json({"ok": True, "service": "spns-rapports-api"})
+        if path == "/api/bootstrap":
+            return self.json(
+                {
+                    "activities": read_table("activities"),
+                    "requests": read_table("requests"),
+                }
+            )
+        return self.json({"error": "Not found"}, 404)
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+        body = self.read_json()
+        if path == "/api/activities/upsert":
+            return self.handle_upsert("activities", body)
+        if path == "/api/requests/upsert":
+            return self.handle_upsert("requests", body)
+        return self.json({"error": "Not found"}, 404)
+
+    def do_DELETE(self):
+        path = urlparse(self.path).path
+        if path.startswith("/api/activities/"):
+            return self.handle_delete("activities", path.removeprefix("/api/activities/"))
+        if path.startswith("/api/requests/"):
+            return self.handle_delete("requests", path.removeprefix("/api/requests/"))
+        return self.json({"error": "Not found"}, 404)
+
+    def handle_upsert(self, table_name, body):
+        try:
+            item = upsert_item(table_name, body.get("item") or {})
+        except ValueError as error:
+            return self.json({"error": str(error)}, 400)
+        return self.json({"ok": True, "item": item})
+
+    def handle_delete(self, table_name, item_id):
+        if not item_id:
+            return self.json({"error": "Missing id"}, 400)
+        deleted = delete_item(table_name, item_id)
+        return self.json({"ok": deleted})
+
+    def read_json(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length) if length else b"{}"
+        return json.loads(raw.decode("utf-8") or "{}")
+
+    def json(self, data, status=200):
+        self.send_response(status)
+        self._cors()
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
+
+    def _cors(self):
+        self.send_header("Access-Control-Allow-Origin", ALLOWED_ORIGIN)
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
+
+
+if __name__ == "__main__":
+    init_db()
+    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    print(f"SPNS Rapports server on http://{HOST}:{PORT}")
+    server.serve_forever()
